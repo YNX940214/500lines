@@ -11,6 +11,12 @@ import socket
 import re
 import urllib.parse
 import time
+import ssl
+
+# 2449 URLs fetched in 500.2 seconds, achieved concurrency = 192449 URLs fetched in 551.4 seconds, achieved concurrency = 19
+
+HOST = 'xkcd.com'
+PORT = 443
 
 
 class Future:
@@ -76,8 +82,29 @@ def connect(sock, address):
 def read(sock):
     f = Future()
 
+    def __gererator():
+        while True:
+            # print('generator called')
+            try:
+                f.set_result(sock.recv(4096))  # Read 4k at a time.
+                break
+            except ssl.SSLError as e:
+                if e.args[0] == ssl.SSL_ERROR_WANT_READ:
+                    yield from f
+                else:
+                    raise
+            except BlockingIOError:
+                raise
+            except ConnectionResetError:
+                raise
+
+    g = __gererator()
+
     def on_readable():
-        f.set_result(sock.recv(4096))  # Read 4k at a time.
+        try:
+            next(g)
+        except StopIteration:
+            pass
 
     selector.register(sock.fileno(), EVENT_READ, on_readable)
     chunk = yield from f
@@ -95,6 +122,33 @@ def read_all(sock):
     return b''.join(response)
 
 
+def do_ssl_handshake(sock, key, b):
+    f = Future()
+    flag = True
+
+    def on_handshake():
+        f.set_result(None)
+
+    while True:
+        try:
+            sock.do_handshake()
+        except ssl.SSLError as err:
+            if err.args[0] == ssl.SSL_ERROR_WANT_READ:
+                if flag:
+                    selector.register(sock.fileno(), EVENT_WRITE | EVENT_READ, on_handshake)
+                    flag = False
+                yield from f
+        except ssl.CertificateError as err:
+            print(err)
+        except socket.error as err:
+            print(err)
+        except AttributeError as err:
+            print(err)
+        else:
+            selector.unregister(sock.fileno())
+            return
+
+
 class Fetcher:
     def __init__(self, url):
         self.response = b''
@@ -105,7 +159,11 @@ class Fetcher:
         concurrency_achieved = max(concurrency_achieved, len(urls_todo))
 
         sock = socket.socket()
-        yield from connect(sock, ('xkcd.com', 80))
+        yield from connect(sock, (HOST, PORT))
+
+        sock = ssl.wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=ssl.CERT_NONE, ssl_version=ssl.PROTOCOL_SSLv23, do_handshake_on_connect=False)
+        yield from do_ssl_handshake(sock, None, None)
+
         get = 'GET {} HTTP/1.0\r\nHost: xkcd.com\r\n\r\n'.format(self.url)
         sock.send(get.encode('ascii'))
         self.response = yield from read_all(sock)
@@ -135,7 +193,7 @@ class Fetcher:
             if parts.scheme not in ('', 'http', 'https'):
                 continue
             host, port = urllib.parse.splitport(parts.netloc)
-            if host and host.lower() not in ('xkcd.com', 'www.xkcd.com'):
+            if host and host.lower() not in (HOST, 'www.xkcd.com'):
                 continue
             defragmented, frag = urllib.parse.urldefrag(parts.path)
             if defragmented not in urls_seen:
@@ -151,7 +209,8 @@ class Fetcher:
 
 start = time.time()
 fetcher = Fetcher('/')
-Task(fetcher.fetch())
+ff = fetcher.fetch()
+Task(ff)
 
 while not stopped:
     events = selector.select()

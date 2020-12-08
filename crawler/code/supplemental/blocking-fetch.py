@@ -12,6 +12,6 @@ def threaded_method():
         response += chunk
         chunk = sock.recv(4096)
 
-    print(response)
+    print(response.decode())
 
 threaded_method()

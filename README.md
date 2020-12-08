@@ -1,3 +1,12 @@
+# Making Crawler Runnable
+
+http://www.aosabook.org/en/500L/a-web-crawler-with-asyncio-coroutines.html made 
+a great demonstration on python coroutine and generator, however the examples 
+in ~/crawler/code/supplemental/*.py can't be executed due to HTTPs. This fork made 
+the two examples runnable by adapting ssl, referencing https://stackoverflow.com/questions/26531146/truly-non-blocking-https-server-in-python and Tornado.
+
+The code is ugly. Please tell me how to make it more elegant.
+
 *500 Lines or Less*
 ===================
 

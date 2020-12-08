@@ -7,8 +7,12 @@ import socket
 import re
 import urllib.parse
 import time
+import ssl
 
+# 2447 URLs fetched in 342.5 seconds, achieved concurrency = 19
 
+HOST = 'xkcd.com'
+PORT = 443
 urls_todo = set(['/'])
 seen_urls = set(['/'])
 concurrency_achieved = 0
@@ -21,18 +25,54 @@ class Fetcher:
         self.response = b''
         self.url = url
         self.sock = None
+        self.flag = True
+
+    def do_hs(self, key, b):
+        try:
+            self.sock.do_handshake()
+        except ssl.SSLError as err:
+            if err.args[0] == ssl.SSL_ERROR_WANT_READ:
+                if self.flag:
+                    selector.register(self.sock.fileno(), EVENT_WRITE | EVENT_READ, self.do_hs)
+                    self.flag = False
+                return
+            elif err.args[0] == ssl.SSL_ERROR_WANT_WRITE:
+                return
+            elif err.args[0] in (ssl.SSL_ERROR_EOF, ssl.SSL_ERROR_ZERO_RETURN):
+                return self.close(exc_info=err)
+            elif err.args[0] == ssl.SSL_ERROR_SSL:
+                try:
+                    peer = self.sock.getpeername()
+                except Exception:
+                    peer = "(not connected)"
+                print("SSL Error on %s %s: %s", self.sock.fileno(), peer, err)
+                return self.close(exc_info=err)
+            raise
+        except ssl.CertificateError as err:
+            print(err)
+        except socket.error as err:
+            print(err)
+        except AttributeError as err:
+            print(err)
+        else:
+            # print('done')
+            selector.unregister(key.fd)
+            selector.register(self.sock.fileno(), EVENT_WRITE, self.connected)
 
     def fetch(self):
+        # print("fetch called")
         global concurrency_achieved
         concurrency_achieved = max(concurrency_achieved, len(urls_todo))
 
         self.sock = socket.socket()
-        self.sock.setblocking(False)
         try:
-            self.sock.connect(('xkcd.com', 80))
+            self.sock.connect((HOST, PORT))
         except BlockingIOError:
             pass
-        selector.register(self.sock.fileno(), EVENT_WRITE, self.connected)
+        self.sock = ssl.wrap_socket(self.sock, keyfile=None, certfile=None, server_side=False, cert_reqs=ssl.CERT_NONE, ssl_version=ssl.PROTOCOL_SSLv23, do_handshake_on_connect=False)
+        self.sock.setblocking(False)
+        self.do_hs("", "")
+        # selector.register(self.sock.fileno(), EVENT_WRITE, self.connected)
 
     def connected(self, key, mask):
         selector.unregister(key.fd)
@@ -42,22 +82,40 @@ class Fetcher:
 
     def read_response(self, key, mask):
         global stopped
+        try:
+            chunk = self.sock.recv(4096)  # 4k chunk size.
+            if chunk:
+                self.response += chunk
+            else:
+                print(self.url)
 
-        chunk = self.sock.recv(4096)  # 4k chunk size.
-        if chunk:
-            self.response += chunk
-        else:
-            selector.unregister(key.fd)  # Done reading.
-            links = self.parse_links()
-            for link in links.difference(seen_urls):
-                urls_todo.add(link)
-                Fetcher(link).fetch()
+                selector.unregister(key.fd)  # Done reading.
+                links = self.parse_links()
+                for link in links.difference(seen_urls):
+                    urls_todo.add(link)
+                    Fetcher(link).fetch()
 
+                seen_urls.update(links)
+                urls_todo.remove(self.url)
+                if not urls_todo:
+                    stopped = True
+        except ssl.SSLError as e:
+            if e.args[0] == ssl.SSL_ERROR_WANT_READ:
+                return
+            else:
+                raise
+        except BlockingIOError:
+            raise
+        except ConnectionResetError as e:
+            print("crawling {0}  failed due to {1}".format(self.url,e))
+            selector.unregister(key.fd)
             seen_urls.update(links)
             urls_todo.remove(self.url)
             if not urls_todo:
                 stopped = True
-            print(self.url)
+            return
+
+
 
     def body(self):
         body = self.response.split(b'\r\n\r\n', 1)[1]
@@ -79,7 +137,7 @@ class Fetcher:
             if parts.scheme not in ('', 'http', 'https'):
                 continue
             host, port = urllib.parse.splitport(parts.netloc)
-            if host and host.lower() not in ('xkcd.com', 'www.xkcd.com'):
+            if host and host.lower() not in (HOST, 'www.xkcd.com'):
                 continue
             defragmented, frag = urllib.parse.urldefrag(parts.path)
             links.add(defragmented)

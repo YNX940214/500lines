@@ -141,19 +141,18 @@ class Crawler:
                 text = yield from response.text()
 
                 # Replace href with (?:href|src) to follow image links.
-                urls = set(re.findall(r'''(?i)href=["']([^\s"'<>]+)''',
-                                      text))
+                urls = set(re.findall(r'''(?i)href=["']([^\s"'<>]+)''', text))
                 if urls:
                     LOGGER.info('got %r distinct urls from %r',
                                 len(urls), response.url)
                 for url in urls:
-                    normalized = urllib.parse.urljoin(response.url, url)
+                    normalized = urllib.parse.urljoin(response.url.human_repr(), url)
                     defragmented, frag = urllib.parse.urldefrag(normalized)
                     if self.url_allowed(defragmented):
                         links.add(defragmented)
 
         stat = FetchStatistic(
-            url=response.url,
+            url=response.url.human_repr(),
             next_url=None,
             status=response.status,
             exception=None,
@@ -165,14 +164,15 @@ class Crawler:
 
         return stat, links
 
-    @asyncio.coroutine
-    def fetch(self, url, max_redirect):
+    # @asyncio.coroutine
+    # def fetch(self, url, max_redirect):
+    async def fetch(self, url, max_redirect):
         """Fetch one URL."""
         tries = 0
         exception = None
         while tries < self.max_tries:
             try:
-                response = yield from self.session.get(
+                response = await self.session.get(
                     url, allow_redirects=False)
 
                 if tries > 1:
@@ -222,25 +222,35 @@ class Crawler:
                     LOGGER.error('redirect limit reached for %r from %r',
                                  next_url, url)
             else:
-                stat, links = yield from self.parse_links(response)
+                stat, links = await self.parse_links(response)
                 self.record_statistic(stat)
                 for link in links.difference(self.seen_urls):
                     self.q.put_nowait((link, self.max_redirect))
                 self.seen_urls.update(links)
         finally:
-            yield from response.release()
+            # pass  # it's not ok
+
+            # response.release()  it's ok, it's the same like `await response.release()`, but maybe it's not ok in other situations.
+
+            await response.release()
 
     @asyncio.coroutine
     def work(self):
         """Process queue items forever."""
         try:
             while True:
+                # print("queue size: {0}".format(self.q.qsize()))
                 url, max_redirect = yield from self.q.get()
                 assert url in self.seen_urls
                 yield from self.fetch(url, max_redirect)
                 self.q.task_done()
+                # raise Exception("cba")
         except asyncio.CancelledError:
             pass
+        # except Exception as e:
+        #     print("queue size: {0}".format(self.q.qsize()))
+        #     print("exception in the outer {0}".format(e))
+        #     raise Exception("abc")
 
     def url_allowed(self, url):
         if self.exclude and re.search(self.exclude, url):
@@ -273,3 +283,12 @@ class Crawler:
         self.t1 = time.time()
         for w in workers:
             w.cancel()
+
+# 1 what's __await__ in noop?
+# https://stackoverflow.com/questions/33409888/how-can-i-await-inside-future-like-objects-await
+
+# 2 the exception handling in Task, raise an exception and it's gone(so cause the un-robust process stuck)?
+# https://stackoverflow.com/questions/65369022/exception-in-python-asyncio-task-not-raised-until-main-task-complete
+
+# 3 the exception 'noop' object not iterable?
+# The `yield from` syntax not supporting `__await__` syntax, replace `yield from` with `await` will fix the exception
